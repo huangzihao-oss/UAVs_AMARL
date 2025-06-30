@@ -4,7 +4,7 @@ import argparse
 
 
 class PollingAlgorithm:
-    def __init__(self, env, uav_id=0):
+    def __init__(self, env, uav_id=0, order = []):
         self.env = env
         self.uav_id = uav_id
         self.K = env.K
@@ -13,7 +13,7 @@ class PollingAlgorithm:
         self.reset()
         
         self.count = 0
-        self.order = [17, 6, 3, 5, 7, 1, 18, 4, 9, 2, 11, 8, 12, 19, 16, 14, 0, 15, 13, 10]
+        self.order = order
 
     def reset(self):
         self.env.reset()
@@ -39,36 +39,12 @@ class PollingAlgorithm:
         distances = np.linalg.norm(self.env.base_pos - self.env.drone_position_now[self.uav_id], axis=1)
         return self.K + np.argmin(distances)
 
-    # def step(self):
-    #     if self.current_time >= self.T:
-    #         return None, 0, True
-
-    #     # 如果缓冲区未满且有未缓存 POI，选择 AoI 最高的 POI
-    #     if len(self.env.drone_buffer[self.uav_id]) < 5:
-    #         next_poi = self.get_next_poi()
-    #         if next_poi is not None:
-    #             action = next_poi
-    #         else:
-    #             action = self.get_nearest_bs()  # 没有未缓存 POI，选择 BS
-    #     else:
-    #         action = self.get_nearest_bs()  # 缓冲区满，选择 BS
-
-    #     # 执行动作
-    #     obs, reward, done, info = self.env.step(self.uav_id, action)
-    #     self.current_time = self.env.drone_timing_now[self.uav_id]
-    #     self.total_reward += reward
-    #     self.total_aoi += np.mean(self.env.aoi)
-    #     self.steps += 1
-    #     self.path.append(action)
-
-    #     return action, reward, done
-
     def step(self):
         if self.current_time >= self.T:
             return None, 0, True
 
         # 如果缓冲区未满且有未缓存 POI，选择 AoI 最高的 POI
-        if len(self.env.drone_buffer[self.uav_id]) >= 5:
+        if len(self.env.drone_buffer[self.uav_id]) >= 7:
             action = self.N+self.K-1
         else:
             action = self.order[self.count%len(self.order)]
@@ -174,9 +150,16 @@ def parse_args():
 if __name__ == "__main__":
     
     args = parse_args()
+    
+    order1 = [1, 17, 6, 18, 9, 20, 4,3,5,7,20]
+    order2 = [2,8,12,19,11,20,16,14,10,0,15,13,20]
+    
     env = MultiDroneAoIEnv(args.M, args.N, args.K, args.T, args.map_size, args=args)
-    algo = PollingAlgorithm(env, uav_id=0)
-    path, total_reward, avg_aoi = algo.run()
+    sum_rewards = 0
+    for i in range(args.M):
+        algo = PollingAlgorithm(env, uav_id=i)
+        path, total_reward, avg_aoi = algo.run()
+        sum_rewards += total_reward
     print(f"Path: {path}")
     print(f"Total Reward: {total_reward}")
     print(f"Average AoI: {avg_aoi}")
@@ -184,10 +167,10 @@ if __name__ == "__main__":
     visual_num = 30
 
     # 可视化路径
-    test_actions = [[] for _ in range(env.M)]
-    test_actions[0].append([0, 0])
-    for action in path:
-        pos = env.get_pos(action)
-        test_actions[0].append(pos)
-    test_actions = np.array(test_actions)
-    env.visualize_routes(test_actions[:, :visual_num], "./test_figs", file="rolling_", nums=visual_num)
+    # test_actions = [[] for _ in range(env.M)]
+    # test_actions[0].append([0, 0])
+    # for action in path:
+    #     pos = env.get_pos(action)
+    #     test_actions[0].append(pos)
+    # test_actions = np.array(test_actions)
+    # env.visualize_routes(test_actions[:, :visual_num], "./test_figs", file="rolling_", nums=visual_num)
