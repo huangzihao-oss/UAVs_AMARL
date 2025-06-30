@@ -127,7 +127,7 @@ def parse_args():
                         help="Run number for pretrained model to prevent overwriting")
 
     # 环境参数
-    parser.add_argument('--M', type=int, default=1, 
+    parser.add_argument('--M', type=int, default=2, 
                         help="Num of UAVs")
     parser.add_argument('--N', type=int, default=1, 
                         help="Num of Bases")
@@ -143,6 +143,11 @@ def parse_args():
                         help="Whether the action space is continuous (default: discrete)")
     parser.add_argument('--reward_scale_size', type=float, default=float(50000), 
                         help="Ratio of pre reward")
+    parser.add_argument('--print_info', action='store_true',
+                        help="print_info?")
+    
+    parser.add_argument('--BS_back_times', type=int, default=10,
+                        help="Time limits")
     args = parser.parse_args()
     return args
 
@@ -151,17 +156,17 @@ if __name__ == "__main__":
     
     args = parse_args()
     
-    order1 = [1, 17, 6, 18, 9, 20, 4,3,5,7,20]
-    order2 = [2,8,12,19,11,20,16,14,10,0,15,13,20]
+    order = [[1, 17, 6, 18, 9, 20, 4,3,5,7,20],
+              [2,8,12,19,11,20,16,14,10,0,15,13,20]]
     
     env = MultiDroneAoIEnv(args.M, args.N, args.K, args.T, args.map_size, args=args)
     sum_rewards = 0
     for i in range(args.M):
-        algo = PollingAlgorithm(env, uav_id=i)
+        algo = PollingAlgorithm(env, uav_id=i, order=order[i])
         path, total_reward, avg_aoi = algo.run()
         sum_rewards += total_reward
-    print(f"Path: {path}")
-    print(f"Total Reward: {total_reward}")
+        print(f"Path: {path}")
+    print(f"Total Reward: {sum_rewards}")
     print(f"Average AoI: {avg_aoi}")
     
     visual_num = 30
