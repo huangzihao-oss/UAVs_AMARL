@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.distributions import MultivariateNormal
 from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
+import copy
 
 ################################## set device ##################################
 print("============================================================================================")
@@ -127,31 +127,33 @@ class ActorCritic(nn.Module):
         # actor
         if has_continuous_action_space:
             self.actor = nn.Sequential(
-                nn.Linear(state_dim, 64),
-                nn.ReLU(),
-                nn.Linear(64, 64),
-                nn.ReLU(),
-                nn.Linear(64, action_dim),
-                nn.ReLU()
+                nn.Linear(state_dim, 128),
+                nn.Mish(),
+                nn.Linear(128, 128),
+                nn.Mish(),
+                nn.Linear(128, action_dim),
+                nn.Mish()
             )
         else:
             self.actor = nn.Sequential(
-                nn.Linear(state_dim, 64),
-                nn.ReLU(),
-                nn.Linear(64, 64),
-                nn.ReLU(),
-                nn.Linear(64, action_dim),
+                nn.Linear(state_dim, 128),
+                nn.Mish(),
+                nn.Linear(128, 128),
+                nn.Mish(),
+                nn.Linear(128, action_dim),
                 nn.Softmax(dim=-1)
             )
         # critic
         self.critic = nn.Sequential(
-            nn.Linear(state_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(state_dim, 128),
+            nn.Mish(),
+            nn.Linear(128, 128),
+            nn.Mish(),
+            nn.Linear(128, 1)
         )
         
+
+    
     def set_action_std(self, new_action_std):
         if self.has_continuous_action_space:
             self.action_var = torch.full((self.action_dim,), new_action_std * new_action_std).to(device)
@@ -163,7 +165,7 @@ class ActorCritic(nn.Module):
     def forward(self):
         raise NotImplementedError
     
-    def act(self, state, mask=None):
+    def act(self, state, mask=None, deter_action=None):
         """
         Select an action during training, applying action mask if provided.
         
@@ -178,22 +180,35 @@ class ActorCritic(nn.Module):
         """
         action_probs = self.actor(state)
         
+        
+            
         if mask is not None:
             # Ensure mask is a tensor and has correct shape
             mask = torch.as_tensor(mask, dtype=torch.float32, device=action_probs.device)
+            if mask.shape != (self.action_dim,):
+                raise ValueError(f"Mask shape {mask.shape} does not match action_dim {self.action_dim}")
+            if mask.sum() == 0:
+                raise ValueError("Mask cannot be all zeros (no valid actions)")
             
             # Apply mask: set invalid action probabilities to 0
             masked_probs = action_probs * mask
             # Add small value to avoid zero probabilities, then normalize
-            masked_probs = masked_probs + 1e-8 * (1 - mask)
+            masked_probs = masked_probs + 1e-25 * (1 - mask)
             masked_probs = masked_probs / masked_probs.sum(dim=-1, keepdim=True)
         else:
             masked_probs = action_probs
-
-        dist = Categorical(probs=masked_probs)
-        action = dist.sample()
-        action_logprob = dist.log_prob(action)
-        state_val = self.critic(state)
+        
+        # 如果指定动作，就查询指定动作的概率
+        if deter_action is not None:
+            dist = Categorical(probs=masked_probs)
+            action = torch.tensor(deter_action, dtype=torch.long).to(device)
+            action_logprob = dist.log_prob(action)
+            state_val = self.critic(state)           
+        else:
+            dist = Categorical(probs=masked_probs)
+            action = dist.sample()
+            action_logprob = dist.log_prob(action)
+            state_val = self.critic(state)
 
         return action.detach(), action_logprob.detach(), state_val.detach()
     
@@ -270,7 +285,7 @@ class ActorCritic(nn.Module):
 
 
 class PPO:
-    def __init__(self, agent_id, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, summary_dir, entropy_ratio, action_std_init=0.6):
+    def __init__(self, agent_id, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, summary_dir, entropy_ratio, gae_lambda, gae_flag, action_std_init=0.6):
 
         self.has_continuous_action_space = has_continuous_action_space
 
@@ -281,6 +296,8 @@ class PPO:
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
         self.entropy_ratio = entropy_ratio
+        self.gae_lambda = gae_lambda
+        self.gae_flag = gae_flag
         
         self.buffer = RolloutBuffer()
 
@@ -298,6 +315,8 @@ class PPO:
         
         self.MseLoss = nn.MSELoss()
         self.update_times = 0
+        self.non_bs_count = 0
+        self.bs_count = 0
 
     def set_action_std(self, new_action_std):
         if self.has_continuous_action_space:
@@ -325,18 +344,18 @@ class PPO:
             print("WARNING : Calling PPO::decay_action_std() on discrete action space policy")
         print("--------------------------------------------------------------------------------------------")
 
-    def select_action(self, state, mask):
+    def select_action(self, state, mask, deter_action=None):
 
 
         with torch.no_grad():
             state = torch.FloatTensor(state).to(device)
-            action, action_logprob, state_val = self.policy_old.act(state, mask)
+            action, action_logprob, state_val = self.policy_old.act(state, mask, deter_action)
         
         self.buffer.states.append(state)
         self.buffer.actions.append(action)
         self.buffer.logprobs.append(action_logprob)
         self.buffer.state_values.append(state_val)
-
+        
         return action.item()
     
     def action_test(self, state, mask):
@@ -359,8 +378,7 @@ class PPO:
                 
         # Normalizing the rewards
         rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
-        
+
         len_batch = len(rewards)
 
         # convert list to tensor
@@ -371,7 +389,11 @@ class PPO:
         old_state_values = torch.squeeze(torch.stack(self.buffer.state_values[:len_batch], dim=0)).detach().to(device)
 
         # calculate advantages
-        advantages = rewards.detach() - old_state_values.detach()
+        if self.gae_flag:
+            advantages = self.compute_gae(self.buffer.rewards, old_state_values, self.buffer.is_terminals)
+            
+        else:    
+            advantages = rewards.detach() - old_state_values.detach()
 
         # Optimize policy for K epochs
         for _ in range(self.K_epochs):
@@ -418,6 +440,42 @@ class PPO:
 
         # clear buffer
         self.buffer.clear()
+     
+    def compute_gae(self, rewards, state_values, is_terminals):
+        """
+        Compute Generalized Advantage Estimation (GAE).
+        
+        Args:
+            rewards: List or tensor of rewards.
+            state_values: Tensor of state value estimates V(s_t).
+            next_state_value: Value estimate of the last state V(s_{T+1}).
+            is_terminals: List or tensor indicating terminal states.
+        
+        Returns:
+            advantages: Tensor of GAE advantages.
+        """
+        gae = 0
+        advantages = []
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+        is_terminals = torch.tensor(is_terminals, dtype=torch.float32).to(device)
+        state_values = torch.squeeze(state_values).detach()
+        # state_values = torch.cat([state_values, torch.tensor([0.0], dtype=torch.float32, device=state_values.device)])
+        
+        for t in reversed(range(len(rewards))):
+            
+            # print(is_terminals[t], self.id)
+            
+            if is_terminals[t]:
+                delta = rewards[t] - state_values[t]
+                gae = delta
+            else:
+            # delta = rewards[t] + self.gamma*state_values[t + 1] - state_values[t]
+                delta = rewards[t] + self.gamma * (t < len(rewards) - 1)*state_values[t + 1] - state_values[t]
+                gae = delta + self.gamma * self.gae_lambda * gae
+            advantages.insert(0, gae)
+        
+        advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
+        return advantages
     
     def save(self, checkpoint_path):
         torch.save(self.policy_old.state_dict(), checkpoint_path)
@@ -428,7 +486,74 @@ class PPO:
         
     def call_2_record(self, steps, value):
         self.writer.add_scalar('reward/test', value, steps)
+    
+    """
+    # !A3C
+    # def update(self) :
+    #     # Monte Carlo estimate of returns
+    #     print_reward = 0
         
+    #     # 这里开始复制
+    #     rewards = copy.copy(self.buffer.rewards)
+    #     len_batch = len(rewards)
+    #     values = copy.copy(self.buffer.state_values[:len(rewards)])
+    #     rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+        
+    #     # A3C式更新
+    #     R = torch.zeros(1, 1).to(device)
+    #     values.append(R)
+    #     values = torch.tensor(values).to(device)
+        
+        
+    #     masks = torch.squeeze(torch.stack(self.buffer.masks[:len_batch], dim=0)).detach().to(device)
+    #     old_states = torch.squeeze(torch.stack(self.buffer.states[:len_batch], dim=0)).detach().to(device)
+    #     old_actions = torch.squeeze(torch.stack(self.buffer.actions[:len_batch], dim=0)).detach().to(device)
+    #     logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions, masks)
+    #     state_values = state_values.view(-1)
+        
+        
+        
+    #     policy_loss = 0
+    #     value_loss = 0
+    #     entropy_loss = 0
+    #     gae = torch.zeros(1, 1).to(device)
+    #     for i in reversed(range(len(rewards))):
+    #         R = self.gamma * R + rewards[i]
+    #         advantage = R - state_values[i]
+    #         value_loss = value_loss + 0.5 * advantage.pow(2)
+
+    #         # Generalized Advantage Estimation
+    #         delta_t = rewards[i] + self.gamma * \
+    #             values[i + 1] - values[i]
+    #         gae = gae * self.gamma * self.gae_lambda + delta_t
+    #         policy_loss = policy_loss - logprobs[i] * gae.detach()
+    #         entropy_loss = entropy_loss - self.entropy_ratio * dist_entropy[i]
+    #         print_reward += rewards[i]
+        
+    #     # 记录
+    #     if self.id == 0:
+    #         self.writer.add_scalar('loss/policy', policy_loss.detach().item(),self.update_times)
+    #         self.writer.add_scalar('loss/critic', value_loss.detach().item(),self.update_times)
+            
+    #         self.writer.add_scalar('stats/critic', state_values.mean(), self.update_times)
+    #         self.writer.add_scalar('stats/entropy', entropy_loss.detach().item(), self.update_times)
+            
+    #         self.writer.add_scalar('reward/train', print_reward, self.update_times)
+            
+            
+    #     # take gradient step
+    #     self.optimizer.zero_grad()
+    #     (policy_loss + 0.5 * value_loss + entropy_loss).backward()
+    #     self.optimizer.step()
+        
+    #     self.update_times += 1
+            
+    #     # Copy new weights into old policy
+    #     self.policy_old.load_state_dict(self.policy.state_dict())
+
+    #     # clear buffer
+    #     self.buffer.clear()
+    """
         
        
 
