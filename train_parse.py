@@ -5,7 +5,7 @@ import argparse
 
 import torch
 import numpy as np
-from PPO import PPO
+from PPO_double import PPO_Hierarchical
 from Env import MultiDroneAoIEnv
 
 import copy
@@ -92,6 +92,15 @@ def parse_args():
                         help="Ratio of pre reward")
     parser.add_argument('--print_info', action='store_true',
                         help="print_info?")
+    
+    # !无人机参数
+    parser.add_argument('--max_speed', type=int, default=20, 
+                        help="Max speed")
+    parser.add_argument('--min_speed', type=int, default=5, 
+                        help="Min speed")
+    parser.add_argument('--Energy', type=int, default=300, 
+                        help="Energy")
+    
     args = parser.parse_args()
     
     print(args.gae_flag, "#"*10)
@@ -131,17 +140,17 @@ def train():
     
    
     
-    # tensorboard 文件名
+    # *tensorboard 文件名(只有一个文件，这样方便，不用找)
     time = datetime.now().strftime("%Y%m%d-%H%M")
     tensorboard_dir = os.path.join(
         'logs',  f'{env_name}')
         # 'logs',  f'{env_name}-{time}')
 
 
-    # !环境  
+    # *环境初始化
     env = MultiDroneAoIEnv(args.M, args.N, args.K, args.T, args.map_size, args=args)
 
-    # state space dimension
+    # *设置状态和动作空间
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
 
@@ -186,10 +195,10 @@ def train():
 
     ################# training procedure ################
 
-    # initialize PPO agents
+    # * 初始化PPO agent
     ppo_agent = []
     for i in range(args.M):
-        ppo_agent.append(PPO(i, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, tensorboard_dir, args.entropy_ratio, args.gae_lambda, args.gae_flag, action_std))
+        ppo_agent.append(PPO_Hierarchical(i, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, tensorboard_dir, args.entropy_ratio, args.gae_lambda, args.gae_flag, args.max_speed - args.min_speed + 1, action_std))
 
     # track total training time
     start_time = datetime.now().replace(microsecond=0)
@@ -212,65 +221,56 @@ def train():
     i_episode = 0
     
     
-    # training loop
+    # * 训练循环
     while time_step <= max_training_timesteps:
 
+        # * 维护每个episode的简单信息：回报、完成情况、每个无人机的当前动作
         state = env.reset()
         current_ep_reward = [0]*args.M
         done_tag = 0
+        UAVs_actions_queue = [-1 for i in range(args.M)] # 维护一个时间队列
         
-        # 维护一个时间队列
-        UAVs_actions_queue = np.ones(args.M)*-1
-        
-        # 维护一个掩码
+        # * 维护一个掩码
         masks = np.ones((args.M, args.K+args.N))
         actions_set = [[] for i in range(args.M)]
         positions_set = [[] for i in range(args.M)]
         done_bool = [0 for i in range(args.M)]
-        
-        # select action with policy
-        UAVs_timing_next = [0 for i in range(args.M)]
-        
-        non_base_count = 0
-        
+        UAVs_timing_next = [0 for i in range(args.M)]   # * 假设让这个无人机做了当前动作，他会到达的下一个时间点
+                
         # 开始一个episode
         for t in range(1, max_ep_len+1):
-
+            
+            # * 每次无人机actor选择开始时，先为所有没有当前动作的无人机选一个动作，并记录他们完成当前动作的时刻
             for i in range(args.M):
                 if UAVs_actions_queue[i] == -1:
-                    
-                    if non_base_count<100:
-                        UAVs_actions_queue[i] = ppo_agent[i].select_action(env._get_obs(i), masks[i])
-                        if UAVs_actions_queue[i] not in list(range(args.K, args.K+args.N)):
-                            non_base_count += 1
-                        else:    
-                            non_base_count = 0
-                    else:
-                        UAVs_actions_queue[i] = ppo_agent[i].select_action(env._get_obs(i), masks[i], args.K+args.N-1)
-                        non_base_count = 0
-                        
-                    UAVs_timing_next[i] += env.time_cost(i, int(UAVs_actions_queue[i]))
-                    
-                    # print(i, UAVs_actions_queue[i], non_base_count)
+                    UAVs_actions_queue[i] = ppo_agent[i].select_action(env._get_obs(i), masks[i])  
+                    UAVs_timing_next[i] += env.time_cost(i, UAVs_actions_queue[i])
+
+            # * 为done的无人机分配一个很大的完成时间，保证选择无人机actor时不会选到他
             for i in range(args.M):
                 UAVs_timing_next[i] += done_bool[i]*100000
 
-            # !超过args.T的就设置为足够大，不用再做动作了
+            # * 从所有无人机actor中选择一个当前完成时间最近的
             action_UAV = np.argmin(UAVs_timing_next)
 
-            state, reward, done, masked = env.step(action_UAV, int(UAVs_actions_queue[action_UAV]))
-            ppo_agent[action_UAV].buffer.masks.append(torch.FloatTensor(masks[action_UAV]).to(torch.device('cuda:0')))
+            state, reward, done, masked = env.step(action_UAV, UAVs_actions_queue[action_UAV])
             
-            actions_set[action_UAV].append(int(UAVs_actions_queue[action_UAV]))
+            # * 添加缓存，masks只添加upper的，这个是做动作时候的mask
+            ppo_agent[action_UAV].upper_ppo.buffer.masks.append(torch.FloatTensor(masks[action_UAV]).to(torch.device('cuda:0')))
+            
+            actions_set[action_UAV].append(UAVs_actions_queue[action_UAV])
             positions_set[action_UAV].append(env.drone_position_now[action_UAV].copy())
             
+            # * 更新环境返回的mask（用于指导下一个动作）
+            # * 因为动作已经做了，需要重新选择动作了
             masks[action_UAV] = masked
-            # masks[action_UAV] = np.ones(args.K+args.N)
             UAVs_actions_queue[action_UAV] = -1
             
-            # saving reward and is_terminals
-            ppo_agent[action_UAV].buffer.rewards.append(reward)
-            ppo_agent[action_UAV].buffer.is_terminals.append(done)
+            # !注意upper和lower都需要添加buffer
+            ppo_agent[action_UAV].upper_ppo.buffer.rewards.append(reward)
+            ppo_agent[action_UAV].lower_ppo.buffer.rewards.append(reward)
+            ppo_agent[action_UAV].upper_ppo.buffer.is_terminals.append(done)
+            ppo_agent[action_UAV].lower_ppo.buffer.is_terminals.append(done)
             
             if done:
                 done_tag += 1
@@ -283,7 +283,7 @@ def train():
             # 所有人UAV都结束后，开始训练
             if done_tag == args.M:
                 if args.M == 1:
-                    print("Episode: {}, agent 1 len : {}, rewards 1: {}, agent 2 len: {}, rewards 2: {}".format(i_episode, len(ppo_agent[0].buffer.rewards), sum(ppo_agent[0].buffer.rewards), len(ppo_agent[0].buffer.rewards), sum(ppo_agent[0].buffer.rewards)))
+                    print("Episode: {}, agent 1 len : {}, rewards 1: {}, agent 2 len: {}, rewards 2: {}".format(i_episode, len(ppo_agent[0].upper_ppo.buffer.rewards), sum(ppo_agent[0].upper_ppo.buffer.rewards), len(ppo_agent[0].upper_ppo.buffer.rewards), sum(ppo_agent[0].upper_ppo.buffer.rewards)))
                 else:
                     # print("Episode: {}, agent 1 len : {}, rewards 1: {}, agent 2 len: {}, rewards 2: {}".format(i_episode, len(ppo_agent[0].buffer.rewards), sum(ppo_agent[0].buffer.rewards), len(ppo_agent[1].buffer.rewards), sum(ppo_agent[1].buffer.rewards)))
                     # 构建格式化字符串的开头
@@ -292,8 +292,8 @@ def train():
                     rewards_sum = 0
                     for i, agent in enumerate(ppo_agent, 1):  # 从 1 开始编号代理
                         format_string += ", Agent {} len: {}, rewards {}: {}"
-                        values.extend([i, len(agent.buffer.rewards), i, sum(agent.buffer.rewards)])
-                        rewards_sum += sum(agent.buffer.rewards)
+                        values.extend([i, len(agent.upper_ppo.buffer.rewards), i, sum(agent.upper_ppo.buffer.rewards)])
+                        rewards_sum += sum(agent.upper_ppo.buffer.rewards)
                     format_string += " Sum of rewards: {}"
                     values.append(rewards_sum)
                     print(format_string.format(*values))
@@ -357,41 +357,37 @@ def train():
             print(1)
             env.reset()
             masks = np.ones((args.M, args.K+args.N))
-            UAVs_actions_queue = np.ones(args.M)*-1
+            UAVs_actions_queue = [-1 for i in range(args.M)]
             done_tag = 0
             test_rewards = [0]*args.M
-            test_actions = [[[0, 0]] for i in range(args.M)]
-            test_route = [[] for i in range(args.M)]
+            test_actions = [[[0, 0]] for i in range(args.M)]    # * 位置序列
+            test_route = [[] for i in range(args.M)]            # * 动作序列
             
+            # select action with policy
+            UAVs_timing_next = env.drone_timing_now
             
-                    
             # 开始一个episode
             finish_step = 400
             for t in range(1, finish_step+1):
-
-                # select action with policy
-                UAVs_timing_next = env.drone_timing_now
-                
                 for i in range(args.M):
                     if UAVs_actions_queue[i] == -1:
                         UAVs_actions_queue[i] = ppo_agent[i].action_test(env._get_obs(i), masks[i])
-                        UAVs_timing_next[i] += env.time_cost(i, int(UAVs_actions_queue[i]))
+                        UAVs_timing_next[i] += env.time_cost(i, UAVs_actions_queue[i])
 
                 # !超过args.T的就设置为足够大，不用再做动作了
                 out_of_T = np.where(UAVs_timing_next >= args.T)
                 UAVs_timing_next[out_of_T] = 100000
                 action_UAV = np.argmin(UAVs_timing_next)
                 
-                state, reward, done, masked = env.step(action_UAV, int(UAVs_actions_queue[action_UAV]))
+                state, reward, done, masked = env.step(action_UAV, UAVs_actions_queue[action_UAV])
                 masks[action_UAV] = masked
                 test_rewards[action_UAV] += reward
-                test_actions[action_UAV].append(list(env.get_pos(int(UAVs_actions_queue[action_UAV]))))
-                test_route[action_UAV].append(int(UAVs_actions_queue[action_UAV]))
+                test_actions[action_UAV].append(list(env.get_pos(int(UAVs_actions_queue[action_UAV][0]))))
+                test_route[action_UAV].append(int(UAVs_actions_queue[action_UAV][0]))
                 UAVs_actions_queue[action_UAV] = -1
                 
                 if done:
                     done_tag += 1
-                    
                 
                 if done_tag == args.M:
                 # if finish_step == t:
@@ -400,7 +396,7 @@ def train():
                     env.visualize_routes(positions_set, "./test_figs")
                     break
                 
-            print(actions_set[0][:30])
+            # print(actions_set[0][:30])
 
             
 

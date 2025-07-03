@@ -147,7 +147,7 @@ class ActorCritic(nn.Module):
 
 # PPO类，上层智能体（目标选择）
 class PPO:
-    def __init__(self, agent_id, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, summary_dir, entropy_ratio, gae_lambda, gae_flag, action_std_init=0.6):
+    def __init__(self, agent_id, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, summaryWriter, entropy_ratio, gae_lambda, gae_flag, action_std_init=0.6):
         self.has_continuous_action_space = has_continuous_action_space
         if has_continuous_action_space:
             self.action_std = action_std_init
@@ -166,8 +166,9 @@ class PPO:
             {'params': self.policy.critic.parameters(), 'lr': lr_critic}
         ])
         
-        self.summary_dir = summary_dir
-        self.writer = SummaryWriter(log_dir=self.summary_dir)
+        # self.summary_dir = summary_dir
+        # self.writer = SummaryWriter(log_dir=self.summary_dir)
+        self.writer = summaryWriter
         self.policy_old = ActorCritic(state_dim, action_dim, has_continuous_action_space, action_std_init).to(device)
         self.policy_old.load_state_dict(self.policy.state_dict())
         
@@ -258,11 +259,11 @@ class PPO:
             loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - self.entropy_ratio * dist_entropy
             
             if self.id == 0:
-                self.writer.add_scalar('loss/policy', policy_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('loss/critic', critic_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('stats/critic', state_values.mean(), self.update_times)
-                self.writer.add_scalar('stats/entropy', entropy_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('reward/train', print_reward, self.update_times)
+                self.writer.add_scalar('loss/policy_upper', policy_loss.detach().item(), self.update_times)
+                self.writer.add_scalar('loss/critic_upper', critic_loss.detach().item(), self.update_times)
+                self.writer.add_scalar('stats/critic_upper', state_values.mean(), self.update_times)
+                self.writer.add_scalar('stats/entropy_upper', entropy_loss.detach().item(), self.update_times)
+                self.writer.add_scalar('reward/train_upper', print_reward, self.update_times)
             
             self.optimizer.zero_grad()
             loss.mean().backward()
@@ -292,21 +293,21 @@ class PPO:
         advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
         return advantages
     
-    def save(self, checkpoint_path):
-        torch.save(self.policy_old.state_dict(), checkpoint_path)
+    # def save(self, checkpoint_path):
+    #     torch.save(self.policy_old.state_dict(), checkpoint_path)
     
-    def load(self, checkpoint_path):
-        self.policy_old.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
-        self.policy.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
+    # def load(self, checkpoint_path):
+    #     self.policy_old.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
+    #     self.policy.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
     
-    def call_2_record(self, steps, value):
-        self.writer.add_scalar('reward/test', value, steps)
+    # def call_2_record(self, steps, value):
+    #     self.writer.add_scalar('reward/test', value, steps)
 
 # LowerPPO类，下层智能体（速度选择）
 class LowerPPO:
-    def __init__(self, agent_id, state_dim_upper, action_dim_upper, action_dim_lower=16, lr_actor=0.0003, lr_critic=0.001, 
-                 gamma=0.99, K_epochs=10, eps_clip=0.2, summary_dir='runs/lower', entropy_ratio=0.01, 
-                 gae_lambda=0.95, gae_flag=True, action_std_init=0.6):
+    def __init__(self, agent_id, state_dim_upper, action_dim_upper, action_dim_lower, lr_actor, lr_critic, 
+                 gamma, K_epochs, eps_clip, summaryWriter, entropy_ratio, 
+                 gae_lambda, gae_flag, action_std_init=0.6):
         self.has_continuous_action_space = False
         self.id = agent_id
         self.gamma = gamma
@@ -326,21 +327,22 @@ class LowerPPO:
             {'params': self.policy.critic.parameters(), 'lr': lr_critic}
         ])
         
-        self.summary_dir = summary_dir
-        self.writer = SummaryWriter(log_dir=self.summary_dir)
+        # self.summary_dir = summary_dir
+        # self.writer = SummaryWriter(log_dir=self.summary_dir)
+        self.writer = summaryWriter
         self.policy_old = ActorCritic(self.state_dim_lower, self.action_dim_lower, self.has_continuous_action_space, action_std_init).to(device)
         self.policy_old.load_state_dict(self.policy.state_dict())
         
         self.MseLoss = nn.MSELoss()
         self.update_times = 0
     
-    def select_action(self, state_upper, action_upper, mask=None, deter_action=None):
+    def select_action(self, state_upper, action_upper, deter_action=None):
         with torch.no_grad():
             state_lower = torch.cat([
                 torch.FloatTensor(state_upper).to(device),
                 torch.FloatTensor([action_upper]).to(device)
             ], dim=-1)
-            action, action_logprob, state_val = self.policy_old.act(state_lower, mask, deter_action)
+            action, action_logprob, state_val = self.policy_old.act(state_lower, deter_action=deter_action)
         
         self.buffer.states.append(state_lower)
         self.buffer.actions.append(action)
@@ -355,7 +357,7 @@ class LowerPPO:
                 torch.FloatTensor(state_upper).to(device),
                 torch.FloatTensor([action_upper]).to(device)
             ], dim=-1)
-            action = self.policy_old.act_test(state_lower, mask)
+            action = self.policy_old.act_test(state_lower)
         return action
     
     def update(self):
@@ -372,7 +374,6 @@ class LowerPPO:
         rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
         len_batch = len(rewards)
         
-        masks = torch.squeeze(torch.stack(self.buffer.masks[:len_batch], dim=0)).detach().to(device)
         old_states = torch.squeeze(torch.stack(self.buffer.states[:len_batch], dim=0)).detach().to(device)
         old_actions = torch.squeeze(torch.stack(self.buffer.actions[:len_batch], dim=0)).detach().to(device)
         old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs[:len_batch], dim=0)).detach().to(device)
@@ -384,7 +385,7 @@ class LowerPPO:
             advantages = rewards.detach() - old_state_values.detach()
         
         for _ in range(self.K_epochs):
-            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions, masks)
+            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
             state_values = torch.squeeze(state_values)
             
             ratios = torch.exp(logprobs - old_logprobs.detach())
@@ -396,12 +397,12 @@ class LowerPPO:
             entropy_loss = dist_entropy.mean()
             loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - self.entropy_ratio * dist_entropy
             
-            if self.id == 1:
-                self.writer.add_scalar('loss/policy', policy_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('loss/critic', critic_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('stats/critic', state_values.mean(), self.update_times)
-                self.writer.add_scalar('stats/entropy', entropy_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('reward/train', print_reward, self.update_times)
+            if self.id == 0:
+                self.writer.add_scalar('loss/policy_lower', policy_loss.detach().item(), self.update_times)
+                self.writer.add_scalar('loss/critic_lower', critic_loss.detach().item(), self.update_times)
+                self.writer.add_scalar('stats/critic_lower', state_values.mean(), self.update_times)
+                self.writer.add_scalar('stats/entropy_lower', entropy_loss.detach().item(), self.update_times)
+                self.writer.add_scalar('reward/train_lower', print_reward, self.update_times)
             
             self.optimizer.zero_grad()
             loss.mean().backward()
@@ -431,31 +432,44 @@ class LowerPPO:
         advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
         return advantages
     
-    def save(self, checkpoint_path):
-        torch.save(self.policy_old.state_dict(), checkpoint_path)
+    # def save(self, checkpoint_path):
+    #     torch.save(self.policy_old.state_dict(), checkpoint_path)
     
-    def load(self, checkpoint_path):
-        self.policy_old.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
-        self.policy.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
+    # def load(self, checkpoint_path):
+    #     self.policy_old.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
+    #     self.policy.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
     
-    def call_2_record(self, steps, value):
-        self.writer.add_scalar('reward/test', value, steps)
+    # def call_2_record(self, steps, value):
+    #     self.writer.add_scalar('reward/test', value, steps)
 
 
 class PPO_Hierarchical:
-    def __init__(self, agent_id, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, summary_dir, entropy_ratio, gae_lambda, gae_flag, action_std_init=0.6):
+    def __init__(self, agent_id, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, summary_dir, entropy_ratio, gae_lambda, gae_flag, speed_levels, action_std_init=0.6):
+        
+        # !先初始化writter
+        if agent_id == 0: 
+            self.summary_dir = summary_dir
+            self.writer = SummaryWriter(log_dir=self.summary_dir)
+        else:
+            self.writer = None
+        
+        self.upper_ppo = PPO(agent_id, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, self.writer, entropy_ratio, gae_lambda, gae_flag)
+        self.lower_ppo = LowerPPO(agent_id, state_dim, 1, speed_levels, lr_actor, lr_critic, gamma, K_epochs, eps_clip, self.writer, entropy_ratio, gae_lambda, gae_flag)
     
     def select_action(self, state, mask, deter_action=None):
-        action_upper = upper_ppo.select_action(state, mask, deter_action[0])
-        action_lower = lower_ppo.select_action(state, action_upper, deter_action[1])
+        action_upper = self.upper_ppo.select_action(state, mask, deter_action[0])
+        action_lower = self.lower_ppo.select_action(state, action_upper, deter_action[1])
+        return [action_upper, action_lower]
     
     def action_test(self, state, mask):
-        
+        action_upper = self.upper_ppo.action_test(state,mask)
+        action_lower = self.lower_ppo.action_test(state,action_upper)
+        return [action_upper, action_lower]
     
     def update(self):
+        self.upper_ppo.update()
+        self.lower_ppo.update()
         
-
-    
     def save(self, checkpoint_path):
         pass
     
@@ -465,6 +479,7 @@ class PPO_Hierarchical:
     
     def call_2_record(self, steps, value):
         self.writer.add_scalar('reward/test', value, steps)
+    
 # 交互函数，展示上下层如何与环境交互
 def hierarchical_rl_step(upper_ppo, lower_ppo, env, state, upper_mask=None, lower_mask=None):
     action_upper = upper_ppo.select_action(state, upper_mask)
@@ -480,21 +495,3 @@ def hierarchical_rl_step(upper_ppo, lower_ppo, env, state, upper_mask=None, lowe
     lower_ppo.buffer.masks.append(lower_mask if lower_mask is not None else torch.ones(lower_ppo.action_dim_lower).to(device))
     
     return next_state, reward, done
-
-# 示例训练循环（需用户根据环境实现）
-def train_hierarchical_rl(env, upper_ppo, lower_ppo, max_episodes=1000, update_timestep=4000):
-    time_step = 0
-    for episode in range(max_episodes):
-        state = env.reset()
-        episode_reward = 0
-        while True:
-            state, reward, done = hierarchical_rl_step(upper_ppo, lower_ppo, env, state)
-            episode_reward += reward
-            time_step += 1
-            if time_step % update_timestep == 0:
-                upper_ppo.update()
-                lower_ppo.update()
-            if done:
-                break
-        upper_ppo.call_2_record(episode, episode_reward)
-        lower_ppo.call_2_record(episode, episode_reward)

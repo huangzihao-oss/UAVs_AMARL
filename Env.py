@@ -57,6 +57,7 @@ class MultiDroneAoIEnv(gym.Env):
         self.drone_pos = np.zeros((M, 2))  # 初始位置 (0, 0)
         self.base_pos = np.zeros((N, 2))
         self.sensor_pos = np.zeros((K, 2))
+        self.min_speed = args.min_speed
         
         # !数据文件
         position_filename = f"./data/poi_{self.K}_bs_{self.N}_map_{int(self.map_size)}x{int(self.map_size)}.npy"
@@ -69,7 +70,7 @@ class MultiDroneAoIEnv(gym.Env):
         self.aoi = np.zeros(K)
         self.global_timing = 0
         # !后期需要进行修改
-        self.fly_speed = 15
+        # self.fly_speed = 15
         self.drone_last_visited_history_at_BS = np.zeros((M, K))
         self.drone_visited_history_timing_at_BS = np.zeros((M, K))
         # self.drone_last_decision_at_BS = np.zeros(M)
@@ -89,12 +90,15 @@ class MultiDroneAoIEnv(gym.Env):
         self.other_drones_delay_rewards = [[] for i in range(M)]
         # self.drone_last_rest_energy = np.zeros(M)
         
+        # !无人机的能量
+        self.drone_energys = np.ones(M) * args.Energy * 1000
+        
         # !观测和动作空间
         # 动作空间：单个无人机
         self.action_space = spaces.Discrete(K + N)
         # 观测空间：单个无人机
         # obs_dim = K+(M+N+K)*2+K+1+M*K+M+1
-        obs_dim = K+K+K+1+K+1+K*M+M+1
+        obs_dim = K+K+K+1+K+1+K*M+M+1+1
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -128,6 +132,10 @@ class MultiDroneAoIEnv(gym.Env):
         self.drone_step_reward = [[] for i in range(self.M)]
         self.drone_position_now = np.zeros((self.M, 2))
         self.other_drones_delay_rewards = [[] for i in range(self.M)]
+        
+        # !无人机的能量
+        self.drone_energys = np.ones(self.M) * self.args.Energy * 1000
+        
         return self._get_obs(0)
 
     def _get_obs(self, uav_id):
@@ -136,9 +144,12 @@ class MultiDroneAoIEnv(gym.Env):
         # *AoI信息
         aoi_obs = self.drone_local_aoi[uav_id].copy()*10/self.T
         
+        # !假定一个无人机速度
+        fly_speed = 15
+        
         # *位置信息
         dis_2_pois = np.linalg.norm(self.sensor_pos-self.drone_position_now[uav_id], axis=-1)
-        move_t_2_pois = dis_2_pois/self.fly_speed
+        move_t_2_pois = dis_2_pois/fly_speed
         next_aoi_2_poi = self.drone_local_aoi[uav_id] + move_t_2_pois
         next_time_2_poi = move_t_2_pois + self.drone_timing_now[uav_id]
         
@@ -182,9 +193,12 @@ class MultiDroneAoIEnv(gym.Env):
         # *缓存大小
         buffer_len = np.array([len(self.drone_step_reward[uav_id])])
         
-        # !注意需要进行归一化 K+K+K+1+K+1+K*M+M+1
+        # *剩余能量
+        rest_energy = np.array([self.drone_energys[uav_id]/30000])
+        
+        # !注意需要进行归一化 K+K+K+1+K+1+K*M+M+1+1
         # print(aoi_obs, dis_2_pois/500)
-        return np.concatenate([aoi_obs, dis_2_pois/500, rewards_2_pois, rewards_2_bs, buffer_obs, time_obs, history_visited_sensors_and_timing, self.drone_last_reward/self.args.reward_scale_size, buffer_len])
+        return np.concatenate([aoi_obs, dis_2_pois/500, rewards_2_pois, rewards_2_bs, buffer_obs, time_obs, history_visited_sensors_and_timing, self.drone_last_reward/self.args.reward_scale_size, buffer_len, rest_energy])
 
     def step(self, uav_id, action):
         """
@@ -200,6 +214,11 @@ class MultiDroneAoIEnv(gym.Env):
             done (bool): 是否终止
             info (dict): 包含drone_id、avg_aoi、current_time等
         """
+        
+        # ! 动作提取
+        fly_speed = action[1] + self.min_speed
+        action = int(action[0])
+        
         assert 0 <= uav_id < self.M, f"Invalid uav_id: {uav_id}"
         assert self.action_space.contains(action), f"Invalid action: {action}"
         
@@ -209,11 +228,14 @@ class MultiDroneAoIEnv(gym.Env):
         if self.K <= action <= self.K+self.N-1:
             target_position = self.base_pos[action-self.K]
             move_dis = euclidean(target_position, self.drone_position_now[uav_id])
-            move_time = move_dis/self.fly_speed
+            move_time = move_dis/fly_speed
             
-            # 根据计算结果更新（位置、时间）
+            # 根据计算结果更新（位置、时间、能量）
             self.drone_position_now[uav_id] = target_position
             self.drone_timing_now[uav_id] += move_time
+            energy_cost = move_time * UAV_Energy(fly_speed)
+            self.drone_energys[uav_id] -= energy_cost
+            
             
             for i in range(self.K):
                 self.drone_local_aoi[uav_id, i] += move_time
@@ -268,12 +290,16 @@ class MultiDroneAoIEnv(gym.Env):
             target_poi = action
             target_position = self.sensor_pos[target_poi]
             move_dis = euclidean(target_position, self.drone_position_now[uav_id])
-            move_time = move_dis/self.fly_speed
+            move_time = move_dis/fly_speed
             
+            # *根据计算结果更新（位置、时间、能量）
             self.drone_timing_now[uav_id] += move_time
             self.drone_buffer[uav_id].append(target_poi)
             self.buffer_timing[uav_id].append(self.drone_timing_now[uav_id])
             self.drone_position_now[uav_id] = target_position
+            
+            energy_cost = move_time * UAV_Energy(fly_speed)
+            self.drone_energys[uav_id] -= energy_cost
             
             for i in range(self.K):
                 self.drone_local_aoi[uav_id, i] += move_time
@@ -289,7 +315,7 @@ class MultiDroneAoIEnv(gym.Env):
         
         done = False
         # !能量或者时间很少的时候，也可以为True
-        if self.drone_timing_now[uav_id] >= self.T:
+        if self.drone_timing_now[uav_id] >= self.T or self.drone_energys[uav_id] <= 1000:
             done = True
         
         # !之后加上mask
@@ -300,6 +326,7 @@ class MultiDroneAoIEnv(gym.Env):
             info[self.K:self.K+self.N] = 0
         
         # 注意时间超出时的波动很大
+        # ?那在get obs函数中，需要也有相同的操作吗
         if self.drone_timing_now[uav_id] > self.T:
             reward = 0
         
@@ -309,17 +336,19 @@ class MultiDroneAoIEnv(gym.Env):
         return  self._get_obs(uav_id), reward/self.args.reward_scale_size, done, info
 
     def time_cost(self, uav_id, action):
+        fly_speed = action[1] + self.min_speed
+        action = int(action[0])
         if self.K <= action <= self.K+self.N-1:
             # print(action-self.K)
             target_position = self.base_pos[action-self.K]
             move_dis = euclidean(target_position, self.drone_position_now[uav_id])
-            move_time = move_dis/self.fly_speed
+            move_time = move_dis/fly_speed
         else:
             target_poi = action
             # print(target_poi)
             target_position = self.sensor_pos[target_poi]
             move_dis = euclidean(target_position, self.drone_position_now[uav_id])
-            move_time = move_dis/self.fly_speed
+            move_time = move_dis/fly_speed
         return move_time
 
     def render(self, mode="human"):
@@ -415,3 +444,17 @@ class MultiDroneAoIEnv(gym.Env):
         filename = file + f"poi_{n_poi}_bs_{n_bs}_map_{int(map_width)}x{int(map_height)}_uav_routes.png"
         filepath = os.path.join(output_dir, filename)
         plt.savefig(filepath, dpi=dpi, bbox_inches='tight')
+
+
+# 飞行能量消耗功率定义
+def UAV_Energy(v):
+    P_b = 79.86
+    P_i = 88.63
+    V_tip = 120
+    u_0 = 4.03
+    f_0 = 0.6
+    a = 1.225
+    n = 0.05
+    R = 0.503
+    energy = P_b*(1 + (3*v*v)/(V_tip*V_tip)) + P_i*np.sqrt(np.sqrt(1 + (v*v*v*v)/(4*(u_0**4))) - v*v/(2*u_0*u_0)) + f_0*a*n*R*v*v*v/2
+    return energy
