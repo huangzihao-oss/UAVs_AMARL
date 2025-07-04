@@ -391,7 +391,8 @@ def train():
                 
                 if done_tag == args.M:
                 # if finish_step == t:
-                    ppo_agent[0].call_2_record(i_episode//10, test_rewards[0])
+                    ppo_agent[0].call_2_record('reward/test', i_episode//10, test_rewards[0])
+                    ppo_agent[0].call_2_record('reward/all_agent', i_episode//10, rewards_sum)
                     # env.visualize_routes(test_actions, "./test_figs")
                     env.visualize_routes(positions_set, "./test_figs")
                     break

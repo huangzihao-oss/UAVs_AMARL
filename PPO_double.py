@@ -337,81 +337,84 @@ class LowerPPO:
         self.update_times = 0
     
     def select_action(self, state_upper, action_upper, deter_action=None):
-        with torch.no_grad():
-            state_lower = torch.cat([
-                torch.FloatTensor(state_upper).to(device),
-                torch.FloatTensor([action_upper]).to(device)
-            ], dim=-1)
-            action, action_logprob, state_val = self.policy_old.act(state_lower, deter_action=deter_action)
+        # with torch.no_grad():
+        #     state_lower = torch.cat([
+        #         torch.FloatTensor(state_upper).to(device),
+        #         torch.FloatTensor([action_upper]).to(device)
+        #     ], dim=-1)
+        #     action, action_logprob, state_val = self.policy_old.act(state_lower, deter_action=deter_action)
         
-        self.buffer.states.append(state_lower)
-        self.buffer.actions.append(action)
-        self.buffer.logprobs.append(action_logprob)
-        self.buffer.state_values.append(state_val)
+        # self.buffer.states.append(state_lower)
+        # self.buffer.actions.append(action)
+        # self.buffer.logprobs.append(action_logprob)
+        # self.buffer.state_values.append(state_val)
         
-        return action.item()
+        # return action.item()
+        return 10
     
     def action_test(self, state_upper, action_upper, mask=None):
-        with torch.no_grad():
-            state_lower = torch.cat([
-                torch.FloatTensor(state_upper).to(device),
-                torch.FloatTensor([action_upper]).to(device)
-            ], dim=-1)
-            action = self.policy_old.act_test(state_lower)
-        return action
+        # with torch.no_grad():
+        #     state_lower = torch.cat([
+        #         torch.FloatTensor(state_upper).to(device),
+        #         torch.FloatTensor([action_upper]).to(device)
+        #     ], dim=-1)
+        #     action = self.policy_old.act_test(state_lower)
+        # return action
+        return 10
     
     def update(self):
-        print_reward = 0
-        rewards = []
-        discounted_reward = 0
-        for reward, is_terminal in zip(reversed(self.buffer.rewards), reversed(self.buffer.is_terminals)):
-            if is_terminal:
-                discounted_reward = 0
-            discounted_reward = reward + (self.gamma * discounted_reward)
-            print_reward += reward
-            rewards.insert(0, discounted_reward)
+        # print_reward = 0
+        # rewards = []
+        # discounted_reward = 0
+        # for reward, is_terminal in zip(reversed(self.buffer.rewards), reversed(self.buffer.is_terminals)):
+        #     if is_terminal:
+        #         discounted_reward = 0
+        #     discounted_reward = reward + (self.gamma * discounted_reward)
+        #     print_reward += reward
+        #     rewards.insert(0, discounted_reward)
                 
-        rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        len_batch = len(rewards)
+        # rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+        # len_batch = len(rewards)
         
-        old_states = torch.squeeze(torch.stack(self.buffer.states[:len_batch], dim=0)).detach().to(device)
-        old_actions = torch.squeeze(torch.stack(self.buffer.actions[:len_batch], dim=0)).detach().to(device)
-        old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs[:len_batch], dim=0)).detach().to(device)
-        old_state_values = torch.squeeze(torch.stack(self.buffer.state_values[:len_batch], dim=0)).detach().to(device)
+        # old_states = torch.squeeze(torch.stack(self.buffer.states[:len_batch], dim=0)).detach().to(device)
+        # old_actions = torch.squeeze(torch.stack(self.buffer.actions[:len_batch], dim=0)).detach().to(device)
+        # old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs[:len_batch], dim=0)).detach().to(device)
+        # old_state_values = torch.squeeze(torch.stack(self.buffer.state_values[:len_batch], dim=0)).detach().to(device)
         
-        if self.gae_flag:
-            advantages = self.compute_gae(self.buffer.rewards, old_state_values, self.buffer.is_terminals)
-        else:
-            advantages = rewards.detach() - old_state_values.detach()
+        # if self.gae_flag:
+        #     advantages = self.compute_gae(self.buffer.rewards, old_state_values, self.buffer.is_terminals)
+        # else:
+        #     advantages = rewards.detach() - old_state_values.detach()
         
-        for _ in range(self.K_epochs):
-            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
-            state_values = torch.squeeze(state_values)
+        # for _ in range(self.K_epochs):
+        #     logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
+        #     state_values = torch.squeeze(state_values)
             
-            ratios = torch.exp(logprobs - old_logprobs.detach())
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages
+        #     ratios = torch.exp(logprobs - old_logprobs.detach())
+        #     surr1 = ratios * advantages
+        #     surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages
             
-            policy_loss = -torch.min(surr1, surr2).mean()
-            critic_loss = self.MseLoss(state_values, rewards).mean()
-            entropy_loss = dist_entropy.mean()
-            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - self.entropy_ratio * dist_entropy
+        #     policy_loss = -torch.min(surr1, surr2).mean()
+        #     critic_loss = self.MseLoss(state_values, rewards).mean()
+        #     entropy_loss = dist_entropy.mean()
+        #     loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - self.entropy_ratio * dist_entropy
             
-            if self.id == 0:
-                self.writer.add_scalar('loss/policy_lower', policy_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('loss/critic_lower', critic_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('stats/critic_lower', state_values.mean(), self.update_times)
-                self.writer.add_scalar('stats/entropy_lower', entropy_loss.detach().item(), self.update_times)
-                self.writer.add_scalar('reward/train_lower', print_reward, self.update_times)
+        #     if self.id == 0:
+        #         self.writer.add_scalar('loss/policy_lower', policy_loss.detach().item(), self.update_times)
+        #         self.writer.add_scalar('loss/critic_lower', critic_loss.detach().item(), self.update_times)
+        #         self.writer.add_scalar('stats/critic_lower', state_values.mean(), self.update_times)
+        #         self.writer.add_scalar('stats/entropy_lower', entropy_loss.detach().item(), self.update_times)
+        #         self.writer.add_scalar('reward/train_lower', print_reward, self.update_times)
             
-            self.optimizer.zero_grad()
-            loss.mean().backward()
-            self.optimizer.step()
+        #     self.optimizer.zero_grad()
+        #     loss.mean().backward()
+        #     self.optimizer.step()
             
-            self.update_times += 1
+        #     self.update_times += 1
         
-        self.policy_old.load_state_dict(self.policy.state_dict())
-        self.buffer.clear()
+        # self.policy_old.load_state_dict(self.policy.state_dict())
+        # self.buffer.clear()
+        return
     
     def compute_gae(self, rewards, state_values, is_terminals):
         gae = 0
@@ -457,8 +460,8 @@ class PPO_Hierarchical:
         self.lower_ppo = LowerPPO(agent_id, state_dim, 1, speed_levels, lr_actor, lr_critic, gamma, K_epochs, eps_clip, self.writer, entropy_ratio, gae_lambda, gae_flag)
     
     def select_action(self, state, mask, deter_action=None):
-        action_upper = self.upper_ppo.select_action(state, mask, deter_action[0])
-        action_lower = self.lower_ppo.select_action(state, action_upper, deter_action[1])
+        action_upper = self.upper_ppo.select_action(state, mask)
+        action_lower = self.lower_ppo.select_action(state, action_upper)
         return [action_upper, action_lower]
     
     def action_test(self, state, mask):
@@ -477,8 +480,8 @@ class PPO_Hierarchical:
         # self.policy_old.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
         # self.policy.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
     
-    def call_2_record(self, steps, value):
-        self.writer.add_scalar('reward/test', value, steps)
+    def call_2_record(self, name, steps, value):
+        self.writer.add_scalar(name, value, steps)
     
 # 交互函数，展示上下层如何与环境交互
 def hierarchical_rl_step(upper_ppo, lower_ppo, env, state, upper_mask=None, lower_mask=None):
